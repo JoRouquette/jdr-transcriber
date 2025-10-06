@@ -1,0 +1,50 @@
+# =========================
+# CONTEXTE TRANSCRIPTION — YAML
+# Chemin recommandé : context/context.yaml
+# Encodage UTF-8. Les commentaires (#) ne sont pas lus par le script.
+# =========================
+
+campaign: '' # Nom de la campagne (affichage / mémo humain)
+setting: # Contexte narratif (aide à l’orthographe des noms propres)
+  place: '' # Lieu principal (ex: "Auberge d'Anwyll, Belienne")
+  date: '' # Repère temporel (ex: "1497 AC, printemps")
+  session: '' # Tag libre (ex: "Session 05")
+  notes: '' # Toute précision utile (ton, ambiance, etc.)
+
+languages: # Langues de la table (le job peut être en auto-détection)
+  primary: fr # Langue principale attendue dans l’audio
+  secondary: en # Langue secondaire (code-switch occasionnel)
+
+# Intervenants potentiels entendus sur les enregistrements.
+# id = nom à afficher dans la sortie ; nicknames = alias entendus ; role est indicatif.
+# voice_samples = extraits WAV/MP3 propres (10–30 s) pour faire correspondre SPK→id.
+speakers:
+  - id: '' # ex: "Jonathan"
+    role: '' # ex: "MJ" | "PJ" | "Invité"
+    nicknames: [] # ex: ["Jo", "Jona"]
+    voice_samples: [] # ex: ["voices/jonathan_10s.wav"]
+  - id: ''
+    role: ''
+    nicknames: []
+    voice_samples: []
+
+# PNJ que le MJ contrôle souvent (suggère l’orthographe à Whisper)
+npcs_controlled_by_mj: [] # ex: ["Vaersurrangkar", "Beliren Meraft"]
+
+# Glossaire de noms propres à “primer” pour améliorer l’orthographe.
+glossary:
+  characters: [] # ex: ["Astraea", "Cassius Welland", "Hélenis"]
+  places: [] # ex: ["Abazil", "Gueule de l’Orage", "Aegasos", "Belienne"]
+  terms: [] # ex: ["Rage Primale", "Chant du Sang", "Yargoïs", "Athamé d’Agonie", "Le Code"]
+
+# Forcer (à la main) l’étiquette d’un locuteur après un premier run, si besoin.
+overrides:
+  speakers:# map SPKx -> id
+  # SPK1: "Jonathan"
+  # SPK2: "Lindsay"
+
+# Optionnel — mémo pour toi (non lu par le script). Laisse si utile.
+notes:
+  mic_setup: '' # ex: "Micro d’ambiance unique au centre de la table"
+  background_noise: '' # ex: "Dés, pages, ventilateur"
+  house_rules: '' # ex: "Ignorer mécaniques; conserver dialogues intégraux"

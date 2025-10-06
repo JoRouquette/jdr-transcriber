@@ -1,0 +1,104 @@
+name: Transcribe & Diarize
+
+on:
+  push:
+    branches:
+      - 'group/**'
+    paths:
+      - 'input/**'
+      - 'context/**'
+      - '.github/workflows/transcribe.yml'
+      - 'app/**'
+      - 'requirements.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    if: startsWith(github.ref_name, 'group/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (LFS ok)
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg unzip zip
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Prepare input (split zips handled)
+        run: |
+          mkdir -p input output
+          if ls *.z01 >/dev/null 2>&1; then unzip -n input.zip -d input || true; fi
+          if [ -f input.zip ]; then unzip -n input.zip -d input || true; fi
+
+      - name: Detect context
+        id: ctx
+        run: |
+          if [ -f context/context.yaml ]; then
+            echo "has_ctx=true" >> $GITHUB_OUTPUT
+            echo "ctx_path=context/context.yaml" >> $GITHUB_OUTPUT
+          elif [ -f context/context.json ]; then
+            echo "has_ctx=true" >> $GITHUB_OUTPUT
+            echo "ctx_path=context/context.json" >> $GITHUB_OUTPUT
+          else
+            echo "has_ctx=false" >> $GITHUB_OUTPUT
+            echo "ctx_path=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run pipeline (with optional context)
+        env:
+          WHISPER_MODEL_SIZE: large-v3
+          VAD_AGGRESSIVENESS: '2'
+          MAX_SPEAKERS: '8'
+          MIN_SPEAKERS: '1'
+          MULTILANG: 'true'
+          PRIMARY_LANG: 'fr'
+          SECONDARY_LANG: 'en'
+          WHISPER_BEAM_SIZE: '5'
+          WHISPER_BEST_OF: '5'
+          INITIAL_PROMPT_REPEAT: '2'
+          SPEAKER_SIM_THRESHOLD: '0.76'
+          MAX_CHUNK_MINUTES: '15'
+          CHUNK_OVERLAP_MS: '3500'
+          MAX_WAV_MB: '150'
+          VAD_FRAME_MS: '20'
+        run: |
+          if [ "${{ steps.ctx.outputs.has_ctx }}" = "true" ]; then
+            python app/process.py --input input --output output --context "${{ steps.ctx.outputs.ctx_path }}"
+          else
+            python app/process.py --input input --output output
+          fi
+
+      - name: Upload artifacts (zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: transcripts
+          path: output/**
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Commit results back to repo (optionnel)
+        run: |
+          if [ -n "$(git status --porcelain output)" ]; then
+            session_msg=$(git log -1 --pretty=%B | grep -o 'session [^ ]\+')
+            git config user.name "github-actions"
+            git config user.email "actions@github.com"
+            git add output
+            git commit -m "resultats $session_msg"
+            git push
+          fi
