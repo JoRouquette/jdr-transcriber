@@ -1,0 +1,76 @@
+# JDR Transcriber
+
+Transcription et diarisation automatique d'enregistrements audio de parties de jeu de rôle, avec identification des locuteurs et prise en compte du contexte narratif.
+
+## Fonctionnalités
+
+- Découpage automatique des fichiers audio volumineux.
+- Détection et séparation des locuteurs (diarisation).
+- Transcription multilingue (français/anglais par défaut).
+- Prise en compte d'un contexte YAML/JSON pour améliorer la transcription (noms propres, glossaire, etc.).
+- Attribution automatique des noms aux locuteurs via empreintes vocales (optionnel).
+- Export des résultats en `.json`, `.srt`, `.txt` et `.md`.
+
+## Structure du projet
+
+```
+app/
+  process.py           # Pipeline principal
+context/
+  context.yaml         # Contexte narratif et configuration des locuteurs
+  voices/              # Empreintes vocales (WAV/MP3 courts)
+output/                # Résultats générés
+requirements.txt       # Dépendances Python
+Dockerfile             # Image Docker pour exécution isolée
+.github/workflows/
+  transcribe.yml       # Workflow GitHub Actions
+```
+
+## Utilisation rapide
+
+### Avec Docker
+
+```sh
+docker build -t jdr-transcriber .
+docker run --rm -v "$PWD/input:/input" -v "$PWD/output:/output" -v "$PWD/context:/context" jdr-transcriber
+```
+
+- Place tes fichiers audio dans `input/`
+- Les résultats seront générés dans `output/`
+- Le contexte (optionnel) doit être dans `context/context.yaml`. Vous pouvez aussi ajouter des empreintes vocales pour les participants, voir [VOICEPRINTS](./context/VOICEPRINTS.MD)
+
+### En local (hors Docker)
+
+```sh
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python app/process.py --input input --output output --context context/context.yaml
+```
+
+## Configuration du contexte
+
+Le fichier [`context/context.yaml`](context/context.yaml) permet :
+
+- de renseigner les noms des joueurs, PNJ, glossaire, etc.
+- d'associer des extraits vocaux pour l'identification automatique des locuteurs.
+
+## Exécution sur GitHub Actions
+
+Le workflow [`transcribe.yml`](.github/workflows/transcribe.yml) permet d'automatiser la transcription à chaque push sur une branche `group/*`.
+
+## Variables d'environnement
+
+Les principaux paramètres sont configurables via variables d'environnement :
+
+- `WHISPER_MODEL_SIZE` (ex: `small`, `large-v3`)
+- `VAD_AGGRESSIVENESS`, `MAX_SPEAKERS`, `MIN_SPEAKERS`, etc.
+
+Voir le [`Dockerfile`](Dockerfile) pour la liste complète.
+
+## Dépendances
+
+Voir [`requirements.txt`](requirements.txt).
+
+## Licence
+
+À compléter selon ton usage.
