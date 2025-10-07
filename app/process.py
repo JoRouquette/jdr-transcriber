@@ -2,6 +2,7 @@ import os, re, json, wave, contextlib, argparse, subprocess
 from pathlib import Path
 from datetime import timedelta
 import yaml
+import warnings
 import numpy as np
 import webrtcvad
 from tqdm import tqdm
@@ -10,8 +11,12 @@ from sklearn.metrics import silhouette_score
 from resemblyzer import VoiceEncoder, preprocess_wav
 from faster_whisper import WhisperModel
 
-if not hasattr(np, "bool"):  # compat NumPy>=1.24 pour resemblyzer
+try:
+    _ = np.bool
+except AttributeError:
     np.bool = np.bool_
+
+warnings.filterwarnings("ignore", category=DeprecationWarning, message=r".*np\.bool.*")
 
 # ---------- utilitaires temps / ffmpeg ----------
 def hhmmss(ms):
@@ -444,17 +449,25 @@ def process_one_wav(model, wav_path, vad_aggr, min_k, max_k, ctx=None, lang_cfg=
     return segs, diar
 
 def sort_key(p: Path):
-    stem = p.stem  # ex : "TripleLame.Session05.1"
-    # 1) Cas "…SessionXX.YY"
-    m = re.search(r"(.*)\.Session(\d+)\.(\d+)$", stem, re.IGNORECASE)
+    stem = p.stem 
+
+    m = re.search(r"^(.*)\.Session(\d+)\.(\d+)$", stem, re.IGNORECASE)
     if m:
         prefix = m.group(1).lower()
         session = int(m.group(2))
-        part = int(m.group(3))
-        return (prefix, session, part)
-    # 2) Sinon, tri "naturel" (10 après 9, pas entre 1 et 2)
-    pieces = re.findall(r'\d+|\D+', stem)
-    return [int(x) if x.isdigit() else x.lower() for x in pieces]
+        part    = int(m.group(3))
+        # Catégorie 0 = motif reconnu
+        return (0, prefix, session, part)
+
+    tokens = re.findall(r'\d+|\D+', stem)
+    norm = []
+    for t in tokens:
+        if t.isdigit():
+            norm.append((0, int(t)))        # 0 = numérique
+        else:
+            norm.append((1, t.lower()))     # 1 = texte
+
+    return (1, tuple(norm))
 
 # ---------- main ----------
 def main(indir, outdir):
