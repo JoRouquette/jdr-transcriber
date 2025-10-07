@@ -713,8 +713,13 @@ def main(indir, outdir):
         return
 
     model_size = os.getenv("WHISPER_MODEL_SIZE", "small")
-    logger.info(f"Loading Whisper model: {model_size}")
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    local_dir = os.getenv("WHISPER_MODEL_DIR") or os.getenv("WHISPER_MODEL_PATH")
+
+    model_id = local_dir if (local_dir and Path(local_dir).exists()) else model_size
+
+    logger.info(f"Loading Whisper model from: {model_id}")
+    model = WhisperModel(model_id, device="cpu", compute_type="int8")
+
     vad_aggr = int(os.getenv("VAD_AGGRESSIVENESS", "2"))
     min_k = int(os.getenv("MIN_SPEAKERS", "1"))
     max_k = int(os.getenv("MAX_SPEAKERS", "8"))
