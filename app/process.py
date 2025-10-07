@@ -10,6 +10,14 @@ from sklearn.cluster import AgglomerativeClustering
 from sklearn.metrics import silhouette_score
 from resemblyzer import VoiceEncoder, preprocess_wav
 from faster_whisper import WhisperModel
+import logging
+
+# ---------- logging setup ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 try:
     _ = np.bool
@@ -24,26 +32,33 @@ def hhmmss(ms):
     return f"{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d},{int(ms - s*1000):03d}"
 
 def run(cmd):
+    logger.debug(f"Running command: {' '.join(map(str, cmd))}")
     subprocess.run(cmd, check=True)
 
 def convert_to_wav16k_mono(src, dst):
+    logger.info(f"Converting {src} to 16kHz mono WAV at {dst}")
     run(["ffmpeg","-y","-i",src,"-ac","1","-ar","16000","-sample_fmt","s16",dst,"-loglevel","error"])
 
 def get_wav_duration_ms(wav_path):
     with contextlib.closing(wave.open(str(wav_path), 'rb')) as wf:
         frames = wf.getnframes(); rate = wf.getframerate()
-    return int(frames * 1000 / rate)
+    duration = int(frames * 1000 / rate)
+    logger.debug(f"Duration of {wav_path}: {duration} ms")
+    return duration
 
 def file_size_mb(path):
-    return os.path.getsize(path) / 1e6
+    size = os.path.getsize(path) / 1e6
+    logger.debug(f"File size of {path}: {size:.2f} MB")
+    return size
 
 def split_wav_ffmpeg(in_wav, chunk_ms, overlap_ms):
     """Retourne une liste [(chunk_path, offset_ms), ...]"""
     out = []
     dur = get_wav_duration_ms(in_wav)
     if dur <= chunk_ms:  # pas besoin
+        logger.info(f"No need to split {in_wav}, duration {dur} ms <= {chunk_ms} ms")
         return [(in_wav, 0)]
-    # planning des débuts avec recouvrement
+    logger.info(f"Splitting {in_wav} into chunks of {chunk_ms} ms with {overlap_ms} ms overlap")
     step = max(1000, chunk_ms - overlap_ms)
     starts = list(range(0, dur, step))
     base = Path(in_wav).with_suffix("").name
@@ -51,7 +66,6 @@ def split_wav_ffmpeg(in_wav, chunk_ms, overlap_ms):
     for i, start in enumerate(starts):
         end = min(start + chunk_ms, dur)
         out_wav = tmpdir / f"{base}__chunk{i:03d}.wav"
-        # découpe exacte sans réencodage additionnel
         run([
             "ffmpeg","-y","-i",in_wav,
             "-ss", f"{start/1000:.3f}",
@@ -59,6 +73,7 @@ def split_wav_ffmpeg(in_wav, chunk_ms, overlap_ms):
             "-ac","1","-ar","16000","-sample_fmt","s16",
             str(out_wav), "-loglevel","error"
         ])
+        logger.debug(f"Created chunk {out_wav} [{start} ms - {end} ms]")
         out.append((str(out_wav), start))
         if end == dur: break
     return out
@@ -66,7 +81,10 @@ def split_wav_ffmpeg(in_wav, chunk_ms, overlap_ms):
 def load_context(path: str | None):
     if not path: return {}
     p = Path(path)
-    if not p.exists(): return {}
+    if not p.exists(): 
+        logger.warning(f"Context file {path} does not exist.")
+        return {}
+    logger.info(f"Loading context from {path}")
     if p.suffix.lower() in [".yaml", ".yml"]:
         with open(p, "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
@@ -76,10 +94,6 @@ def load_context(path: str | None):
     return {}
 
 def build_initial_prompt(ctx: dict, primary_lang: str, secondary_lang: str, repeat: int = 1):
-    """
-    Construit une phrase amorce pour Whisper avec noms propres et termes clés.
-    Répéter les noms aide à la stabilisation orthographique.
-    """
     if not ctx: return None
     names = []
     for s in ctx.get("speakers", []):
@@ -94,17 +108,13 @@ def build_initial_prompt(ctx: dict, primary_lang: str, secondary_lang: str, repe
     bag = list(dict.fromkeys([x.strip() for x in bag if x and isinstance(x, str)]))  # déduplique
     bag = sum([[x]*int(max(1, repeat)) for x in bag], [])  # répète
 
-    # Une phrase courte suffit, bilingue si besoin
+    logger.debug(f"Built initial prompt with {len(bag)} terms")
     return (
         f"Langue principale: {primary_lang}. Langue secondaire: {secondary_lang}. "
         f"Noms propres et termes importants: " + ", ".join(bag) + "."
     )
 
 def load_voiceprints(ctx: dict):
-    """
-    Charge des empreintes vocales optionnelles par intervenant à partir de fichiers courts (10–30 s).
-    Retourne { 'Nom': embedding[np.array] }.
-    """
     m = {}
     samples_root = Path("context")
     enc = VoiceEncoder()
@@ -114,11 +124,14 @@ def load_voiceprints(ctx: dict):
         embs = []
         for rel in paths:
             f = (samples_root / rel).resolve() if not Path(rel).is_absolute() else Path(rel)
-            if not f.exists(): continue
+            if not f.exists(): 
+                logger.warning(f"Voice sample {f} for speaker {name} does not exist.")
+                continue
             wav = preprocess_wav(f)
             emb = enc.embed_utterance(wav)
             embs.append(emb)
         if embs:
+            logger.info(f"Loaded {len(embs)} voice samples for {name}")
             m[name] = np.mean(np.vstack(embs), axis=0)
     return m
 
@@ -128,10 +141,6 @@ def cosine_sim(a, b):
     return float(np.dot(a, b))
 
 def compute_cluster_centroids(wav_path, diar_segments):
-    """
-    Calcule un embedding centroidal par label SPKx à partir des segments diarizés.
-    Retourne { 'SPK1': emb, ... }.
-    """
     if not diar_segments: return {}
     wav = preprocess_wav(wav_path)
     sr = 16000
@@ -148,13 +157,10 @@ def compute_cluster_centroids(wav_path, diar_segments):
     for lab, lst in by.items():
         if lst:
             out[lab] = np.mean(np.vstack(lst), axis=0)
+    logger.info(f"Computed centroids for {len(out)} speakers")
     return out
 
 def rename_speakers_by_similarity(segs, spk_centroids, voiceprints, threshold=0.76, overrides=None):
-    """
-    Mappe SPKx -> Nom si similarité cosinus dépasse 'threshold'.
-    Respecte les overrides éventuels (SPK1: 'Jonathan', ...).
-    """
     if overrides:
         for s in segs:
             if s["speaker"] in overrides:
@@ -164,7 +170,6 @@ def rename_speakers_by_similarity(segs, spk_centroids, voiceprints, threshold=0.
         return segs
 
     used = set()
-    # Tri: on nomme d'abord les SPK qui parlent le plus
     talk = {}
     for s in segs:
         talk[s["speaker"]] = talk.get(s["speaker"], 0) + (s["end_ms"] - s["start_ms"])
@@ -179,10 +184,13 @@ def rename_speakers_by_similarity(segs, spk_centroids, voiceprints, threshold=0.
             if sim > best_sim:
                 best_name, best_sim = name, sim
         if best_name and best_sim >= threshold:
+            logger.info(f"Mapping {lab} to {best_name} (similarity={best_sim:.2f})")
             for s in segs:
                 if s["speaker"] == lab:
                     s["speaker"] = best_name
             used.add(best_name)
+        else:
+            logger.info(f"No match for {lab} (best similarity={best_sim:.2f})")
     return segs
 
 # ---------- VAD / diarisation / transcription ----------
@@ -192,12 +200,12 @@ def read_pcm_frames(wav_path, frame_ms=30):
         rate = wf.getframerate()
         frame_bytes = int(rate * (frame_ms/1000.0) * 2)  # 2 bytes (s16)
         pcm = wf.readframes(wf.getnframes())
-    # On ne garde que des frames de taille exacte
     usable = len(pcm) - (len(pcm) % frame_bytes)
     frames = [pcm[i:i+frame_bytes] for i in range(0, usable, frame_bytes)]
     return frames, rate, frame_ms
 
 def vad_segments(wav_path, aggressiveness=2, frame_ms=30, pad_ms=150):
+    logger.info(f"Running VAD on {wav_path} (aggr={aggressiveness}, frame_ms={frame_ms})")
     vad = webrtcvad.Vad(aggressiveness)
     frames, rate, frame_ms = read_pcm_frames(wav_path, frame_ms)
     frame_bytes = int(rate * (frame_ms/1000.0) * 2)
@@ -214,7 +222,6 @@ def vad_segments(wav_path, aggressiveness=2, frame_ms=30, pad_ms=150):
         try:
             is_speech = vad.is_speech(fr, rate)
         except webrtcvad.Error:
-            # On ignore la frame et on avance proprement
             ms += frame_ms
             continue
 
@@ -235,13 +242,13 @@ def vad_segments(wav_path, aggressiveness=2, frame_ms=30, pad_ms=150):
     if cur_start is not None:
         speech.append((cur_start, ms))
 
-    # fusion de segments proches
     merged = []
     for s,e in speech:
         if not merged or s - merged[-1][1] > 200:
             merged.append([s,e])
         else:
             merged[-1][1] = e
+    logger.info(f"Detected {len(merged)} speech segments")
     return [(s,e) for s,e in merged]
 
 def sliding_windows(segment, win_ms=1600, hop_ms=800):
@@ -257,6 +264,7 @@ def embed_segments(wav_path, segments_ms):
         if e_idx - s_idx < int(0.5*sr): continue
         seg = wav[s_idx:e_idx]; emb = enc.embed_utterance(seg)
         embs.append(emb); spans.append((s,e))
+    logger.debug(f"Embedded {len(embs)} segments")
     return (np.vstack(embs) if embs else np.empty((0,256))), spans
 
 def choose_k(embeddings, min_k=1, max_k=8):
@@ -269,6 +277,7 @@ def choose_k(embeddings, min_k=1, max_k=8):
         try: sc = silhouette_score(embeddings, labels, metric='cosine')
         except: sc = -1
         if sc>best: best, best_k = sc, k
+    logger.info(f"Chose {best_k} clusters (score={best:.2f})")
     return 1 if best < 0.12 else best_k
 
 def diarize(wav_path, speech_spans, min_k=1, max_k=8):
@@ -290,15 +299,13 @@ def diarize(wav_path, speech_spans, min_k=1, max_k=8):
             else: merged[-1][1]=max(merged[-1][1], e)
         out += [(s,e,spk) for s,e in merged]
     out.sort()
+    logger.info(f"Diarized into {len(by_spk)} speakers")
     return out
 
 def intersect(a0,a1,b0,b1): return max(0, min(a1,b1) - max(a0,b0))
 
 def transcribe_words(model, wav_path, language=None, initial_prompt=None, beam_size=5, best_of=5):
-    """
-    language: None => auto (multilingue). "fr" => force français.
-    initial_prompt: amorce de contexte (noms propres, lieux, jargon).
-    """
+    logger.info(f"Transcribing {wav_path} (lang={language}, beam={beam_size}, best_of={best_of})")
     segments, _ = model.transcribe(
         wav_path,
         word_timestamps=True,
@@ -316,6 +323,7 @@ def transcribe_words(model, wav_path, language=None, initial_prompt=None, beam_s
         for w in seg.words:
             if w.start is None or w.end is None: continue
             words.append({"word": w.word.strip(), "start_ms": int(w.start*1000), "end_ms": int(w.end*1000)})
+    logger.info(f"Transcribed {len(words)} words")
     return words
 
 def assign_words_to_speakers(words, spk_segments):
@@ -330,6 +338,7 @@ def assign_words_to_speakers(words, spk_segments):
             if ov>best: best, who = ov, spk
         if who is None: who = last or "SPK1"
         last = who; w["speaker"]=who; assigned.append(w)
+    logger.debug(f"Assigned speakers to {len(assigned)} words")
     return assigned
 
 def words_to_segments(assigned, gap_ms=900):
@@ -346,10 +355,10 @@ def words_to_segments(assigned, gap_ms=900):
         last_end=w["end_ms"]
     txt=" ".join(tokens).strip()
     if txt: segs.append({"start_ms":cur_start,"end_ms":last_end,"speaker":cur_spk,"text":txt})
+    logger.debug(f"Segmented into {len(segs)} segments")
     return segs
 
 def merge_adjacent_segments(segs, gap_ms=900):
-    """Fusionne si même speaker et silence court entre deux segments consécutifs (après concat des chunks)."""
     if not segs: return segs
     segs = sorted(segs, key=lambda s: s["start_ms"])
     out=[segs[0]]
@@ -360,13 +369,10 @@ def merge_adjacent_segments(segs, gap_ms=900):
             last["text"] = (last["text"] + " " + s["text"]).strip()
         else:
             out.append(s)
+    logger.info(f"Merged to {len(out)} segments")
     return out
 
 def reconcile_speakers(prev_segs, new_segs, seam_start_ms, window_ms=5000):
-    """
-    Aligne les labels de locuteurs d’un chunk avec les précédents,
-    en comparant les segments autour de la jointure (recouvrement).
-    """
     if not prev_segs or not new_segs: return new_segs
     prev_window = []
     new_window  = []
@@ -379,7 +385,6 @@ def reconcile_speakers(prev_segs, new_segs, seam_start_ms, window_ms=5000):
     if not prev_window or not new_window:
         return new_segs
 
-    # calcule les recouvrements cumulés par paire (new_spk -> prev_spk)
     overlap = {}
     for a in new_window:
         for b in prev_window:
@@ -388,7 +393,6 @@ def reconcile_speakers(prev_segs, new_segs, seam_start_ms, window_ms=5000):
             overlap.setdefault(a["speaker"], {}).setdefault(b["speaker"], 0)
             overlap[a["speaker"]][b["speaker"]] += ov
 
-    # mapping greedy: pour chaque speaker du chunk, on mappe vers le prev_spk le plus chevauchant
     mapping = {}
     used_prev = set()
     for new_spk, d in overlap.items():
@@ -397,23 +401,26 @@ def reconcile_speakers(prev_segs, new_segs, seam_start_ms, window_ms=5000):
             mapping[new_spk] = prev_spk
             used_prev.add(prev_spk)
 
-    # applique le mapping
     for s in new_segs:
         if s["speaker"] in mapping:
             s["speaker"] = mapping[s["speaker"]]
+    logger.info(f"Reconciled speakers at seam {seam_start_ms} ms")
     return new_segs
 
 # ---------- sorties ----------
 def save_srt(segs, path):
+    logger.info(f"Saving SRT to {path}")
     with open(path,"w",encoding="utf-8") as f:
         for i,s in enumerate(segs, start=1):
             f.write(f"{i}\n{hhmmss(s['start_ms'])} --> {hhmmss(s['end_ms'])}\n[{s['speaker']}] {s['text']}\n\n")
 
 def save_txt(segs, path):
+    logger.info(f"Saving TXT to {path}")
     with open(path,"w",encoding="utf-8") as f:
         for s in segs: f.write(f"{s['speaker']}: {s['text']}\n")
 
 def save_md(segs, path, title):
+    logger.info(f"Saving Markdown to {path}")
     with open(path,"w",encoding="utf-8") as f:
         f.write(f"# {title}\n\n")
         for s in segs:
@@ -423,13 +430,12 @@ def save_md(segs, path, title):
 # ---------- pipeline par WAV ----------
 def process_one_wav(model, wav_path, vad_aggr, min_k, max_k, ctx=None, lang_cfg=None, beam=5, best_of=5, prompt_repeat=1):
     frame_ms = int(os.getenv("VAD_FRAME_MS", "30"))
+    logger.info(f"Processing {wav_path}")
     speech = vad_segments(wav_path, aggressiveness=vad_aggr, frame_ms=frame_ms)
     diar   = diarize(wav_path, speech, min_k=min_k, max_k=max_k)
 
-    # langue
     language = None if (lang_cfg and lang_cfg.get("multilang")) else (lang_cfg.get("primary") if lang_cfg else None)
 
-    # prompt de contexte
     init_prompt = build_initial_prompt(
         ctx, 
         (lang_cfg or {}).get("primary","fr"),
@@ -456,16 +462,15 @@ def sort_key(p: Path):
         prefix = m.group(1).lower()
         session = int(m.group(2))
         part    = int(m.group(3))
-        # Catégorie 0 = motif reconnu
         return (0, prefix, session, part)
 
     tokens = re.findall(r'\d+|\D+', stem)
     norm = []
     for t in tokens:
         if t.isdigit():
-            norm.append((0, int(t)))        # 0 = numérique
+            norm.append((0, int(t)))
         else:
-            norm.append((1, t.lower()))     # 1 = texte
+            norm.append((1, t.lower()))
 
     return (1, tuple(norm))
 
@@ -474,16 +479,16 @@ def main(indir, outdir):
     from pathlib import Path
     Path(outdir).mkdir(parents=True, exist_ok=True)
 
-    # Collecte des fichiers audio et tri "naturel" + pattern SessionXX.YY
     files = [Path(indir)/p for p in os.listdir(indir)]
     files = [p for p in files if p.is_file() and p.suffix.lower() in [".mp3",".m4a",".wav",".mp4",".mpeg",".mpga",".ogg",".webm"]]
     files.sort(key=sort_key)
     if not files:
+        logger.error("Aucun fichier audio dans input/.")
         print("Aucun fichier audio dans input/.")
         return
 
-    # Modèle Whisper (CPU) et paramètres globaux
     model_size   = os.getenv("WHISPER_MODEL_SIZE","small")
+    logger.info(f"Loading Whisper model: {model_size}")
     model        = WhisperModel(model_size, device="cpu", compute_type="int8")
     vad_aggr     = int(os.getenv("VAD_AGGRESSIVENESS","2"))
     min_k        = int(os.getenv("MIN_SPEAKERS","1"))
@@ -493,12 +498,10 @@ def main(indir, outdir):
     chunk_overlap = int(os.getenv("CHUNK_OVERLAP_MS","3000"))
     max_wav_mb    = float(os.getenv("MAX_WAV_MB","150"))
 
-    # Contexte (facultatif)
-    ctx_path_env = os.getenv("CTX_ARG_PATH")  # alimenté par __main__ si --context fourni
+    ctx_path_env = os.getenv("CTX_ARG_PATH")
     ctx_global   = load_context(ctx_path_env) if ctx_path_env else {}
     voiceprints  = load_voiceprints(ctx_global) if ctx_global else {}
 
-    # Langues & décodage
     lang_cfg = {
         "multilang": os.getenv("MULTILANG","true").lower() == "true",
         "primary":   os.getenv("PRIMARY_LANG","fr"),
@@ -514,7 +517,6 @@ def main(indir, outdir):
         tmp  = Path(outdir)/f"{base}__16k.wav"
         convert_to_wav16k_mono(str(src), str(tmp))
 
-        # Découpage si nécessaire (par durée OU taille)
         dur_ms     = get_wav_duration_ms(str(tmp))
         need_split = (dur_ms > max_chunk_min*60*1000) or (file_size_mb(str(tmp)) > max_wav_mb)
         chunks     = split_wav_ffmpeg(str(tmp), max_chunk_min*60*1000, chunk_overlap) if need_split else [(str(tmp), 0)]
@@ -523,50 +525,43 @@ def main(indir, outdir):
         diar_all = []
 
         for i, (chunk_wav, offset) in enumerate(chunks):
+            logger.info(f"Processing chunk {i+1}/{len(chunks)}: {chunk_wav} (offset={offset} ms)")
             segs, diar = process_one_wav(
                 model, chunk_wav, vad_aggr, min_k, max_k,
                 ctx=ctx_global, lang_cfg=lang_cfg,
                 beam=beam, best_of=best_of, prompt_repeat=prompt_repeat
             )
 
-            # Applique l’offset temporel global du chunk
             for s in segs:
                 s["start_ms"] += offset
                 s["end_ms"]   += offset
 
-            # Conserve la diarisation décalée pour calculer les centroides finaux
             diar_shifted = [(s+offset, e+offset, lab) for (s,e,lab) in diar]
             diar_all.extend(diar_shifted)
 
-            # Réconciliation des labels aux jointures à partir du 2e chunk
             if i > 0:
                 seam = offset
                 segs = reconcile_speakers(all_segs, segs, seam_start_ms=seam, window_ms=min(5000, chunk_overlap+2000))
 
             all_segs.extend(segs)
 
-        # Mapping SPKx -> noms (si empreintes vocales fournies)
         overrides = (ctx_global.get("overrides", {}) or {}).get("speakers", {}) if ctx_global else {}
         if voiceprints and diar_all:
             centroids = compute_cluster_centroids(str(tmp), diar_all)
             all_segs  = rename_speakers_by_similarity(all_segs, centroids, voiceprints, threshold=sim_threshold, overrides=overrides)
         elif overrides:
-            # Applique juste les overrides explicites si pas de voiceprints
             for s in all_segs:
                 if s["speaker"] in overrides:
                     s["speaker"] = overrides[s["speaker"]]
 
-        # Fusion finale pour lisibilité
         all_segs = merge_adjacent_segments(all_segs, gap_ms=900)
 
-        # Sauvegardes
         with open(Path(outdir)/f"{base}.json","w",encoding="utf-8") as f:
             json.dump(all_segs, f, ensure_ascii=False, indent=2)
         save_srt(all_segs, Path(outdir)/f"{base}.srt")
         save_txt(all_segs, Path(outdir)/f"{base}.txt")
         save_md(all_segs, Path(outdir)/f"{base}.md", f"Transcription diarisée — {base}")
 
-        # Nettoyage
         try:
             if need_split:
                 for (chunk_wav, _) in chunks:
@@ -575,9 +570,8 @@ def main(indir, outdir):
                         p.unlink()
             if Path(tmp).exists():
                 Path(tmp).unlink()
-        except:
-            pass
-
+        except Exception as e:
+            logger.warning(f"Cleanup failed: {e}")
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
