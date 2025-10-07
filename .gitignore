@@ -1,0 +1,14 @@
+!.vscode/**
+
+# Ignore Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+.venv/
+env/
+
+./input/** 
+./output/**
+./context/voices/**
