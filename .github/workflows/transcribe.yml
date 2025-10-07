@@ -74,7 +74,11 @@ jobs:
           INITIAL_PROMPT_REPEAT: '2'
           SPEAKER_SIM_THRESHOLD: '0.76'
           MAX_CHUNK_MINUTES: '15'
-          CHUNK_OVERLAP_MS: '3500'
+          CHUNK_OVERLAP_MS: '2000'
+          TRIM_OVERLAP_HEAD_MS: '1500'
+          WHISPER_CRT: '1.35'
+          WHISPER_LPT: '-0.6'
+          WHISPER_NST: '0.6'
           MAX_WAV_MB: '150'
           VAD_FRAME_MS: '20'
         run: |
